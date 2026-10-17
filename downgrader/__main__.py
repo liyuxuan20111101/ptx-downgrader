@@ -3,6 +3,12 @@ import argparse
 import os
 import sys
 
+# Windows consoles default to legacy codepages (cp1252/cp936) that cannot
+# encode the CJK status output below; force UTF-8 everywhere.
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8")
+
 from .parser import parse_module, UnsupportedError
 from .engine import downgrade_module
 from .validate import validate
