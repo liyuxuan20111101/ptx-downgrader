@@ -11,6 +11,9 @@ jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash            # Windows runners default to pwsh; bash keeps steps identical
     strategy:
       fail-fast: false
       matrix:
@@ -34,35 +37,13 @@ jobs:
           python tools/sim_mma8.py
 
       - name: CLI downgrade smoke test (mixed kernel)
-        run: |
-          python -m downgrader m1/kernels/k13_mixed.ptx -o build/k13_mixed.sm61.ptx --no-validate
+        run: python -m downgrader m1/kernels/k13_mixed.ptx -o build/k13_mixed.sm61.ptx --no-validate
 
       - name: Downgrade all test kernels
-        run: |
-          python -c "
-          from downgrader.parser import parse_module
-          from downgrader.engine import downgrade_module
-          import pathlib
-          for p in sorted(pathlib.Path('m1/kernels').glob('*.ptx')):
-              text, warns = downgrade_module(parse_module(p.read_text()))
-              out = pathlib.Path('build') / (p.stem + '.sm61.ptx')
-              out.parent.mkdir(exist_ok=True)
-              out.write_text(text)
-              print(f'{p.name}: downgraded, {len(text.splitlines())} lines')
-          "
+        run: python tools/ci_downgrade_all.py
 
       - name: Idempotency check (second downgrade is a no-op)
-        run: |
-          python -c "
-          from downgrader.parser import parse_module
-          from downgrader.engine import downgrade_module
-          import pathlib
-          for p in sorted(pathlib.Path('build').glob('*.sm61.ptx')):
-              once, _ = downgrade_module(parse_module(p.read_text()))
-              twice, _ = downgrade_module(parse_module(once))
-              assert once == twice, f'{p.name}: not idempotent'
-              print(f'{p.name}: idempotent OK')
-          "
+        run: python tools/ci_idempotency.py
 
       - name: Reject-list coverage audit
         run: python tools/audit_reject.py
@@ -71,11 +52,4 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           python setup_tools.py
-          python -c "
-          from downgrader.validate import validate
-          import pathlib
-          for p in sorted(pathlib.Path('build').glob('*.sm61.ptx')):
-              ok, err = validate(str(p))
-              assert ok, f'{p.name}: ' + err
-              print(f'{p.name}: ptxas OK')
-          "
+          python tools/ci_validate.py
