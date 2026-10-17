@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: pip install numpy
+
+      - name: mma fragment simulators vs numpy (k16 + k8)
+        run: |
+          python tools/sim_mma.py
+          python tools/sim_mma8.py
+
+      - name: CLI downgrade smoke test (mixed kernel)
+        run: |
+          python -m downgrader m1/kernels/k13_mixed.ptx -o build/k13_mixed.sm61.ptx --no-validate
+
+      - name: Downgrade all test kernels
+        run: |
+          python -c "
+          from downgrader.parser import parse_module
+          from downgrader.engine import downgrade_module
+          import pathlib
+          for p in sorted(pathlib.Path('m1/kernels').glob('*.ptx')):
+              text, warns = downgrade_module(parse_module(p.read_text()))
+              out = pathlib.Path('build') / (p.stem + '.sm61.ptx')
+              out.parent.mkdir(exist_ok=True)
+              out.write_text(text)
+              print(f'{p.name}: downgraded, {len(text.splitlines())} lines')
+          "
+
+      - name: Idempotency check (second downgrade is a no-op)
+        run: |
+          python -c "
+          from downgrader.parser import parse_module
+          from downgrader.engine import downgrade_module
+          import pathlib
+          for p in sorted(pathlib.Path('build').glob('*.sm61.ptx')):
+              once, _ = downgrade_module(parse_module(p.read_text()))
+              twice, _ = downgrade_module(parse_module(once))
+              assert once == twice, f'{p.name}: not idempotent'
+              print(f'{p.name}: idempotent OK')
+          "
+
+      - name: Reject-list coverage audit
+        run: python tools/audit_reject.py
+
+      - name: ptxas validation (Windows runner only — tools are Windows binaries)
+        if: runner.os == 'Windows'
+        run: |
+          python setup_tools.py
+          python -c "
+          from downgrader.validate import validate
+          import pathlib
+          for p in sorted(pathlib.Path('build').glob('*.sm61.ptx')):
+              ok, err = validate(str(p))
+              assert ok, f'{p.name}: ' + err
+              print(f'{p.name}: ptxas OK')
+          "
