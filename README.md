@@ -1,5 +1,7 @@
 # ptx-downgrader
 
+[![CI](https://github.com/liyuxuan20111101/ptx-downgrader/actions/workflows/ci.yml/badge.svg)](https://github.com/liyuxuan20111101/ptx-downgrader/actions/workflows/ci.yml)
+
 **Run CUDA 13-era PTX on Pascal GPUs (GTX 10-series, sm_61) by degrading modern PTX to ISA 7.0 — pure software, no driver patching, no signature hacks.**
 
 When NVIDIA ended Pascal support (driver branch R580 was the last; CUDA 13 removed `sm_61` compilation targets), applications shipping only modern PTX or SASS stopped working on GTX 10-series GPUs. This project implements the missing link:
