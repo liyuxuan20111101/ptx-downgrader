@@ -34,6 +34,7 @@ def main():
         sys.exit(2)
 
     out_path = _safe_out(args.output or (args.input.rsplit(".", 1)[0] + ".sm61.ptx"))
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(out_text)
     for w in warns:
