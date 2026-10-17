@@ -1,0 +1,45 @@
+.version 7.0
+.target sm_61
+.address_size 64
+
+// int8 降级演示:每线程对一个 4 元素 int8 向量做点积。
+// dp4a 是 sm_61 原生指令(新架构张量核 int8 MMA 的降级落点),
+// 这是 int8 量化大模型推理(llama.cpp Q8/GPTQ 类)的算力基石。
+.visible .entry dp4a_dot(
+    .param .u64 a,        // n 个 int32,每个打包 4 x s8
+    .param .u64 b,        // n 个 int32,每个打包 4 x s8
+    .param .u64 out,      // n 个 int32
+    .param .u32 n)
+{
+    .reg .pred  %p<2>;
+    .reg .b32   %r<10>;
+    .reg .b64   %rd<10>;
+
+    ld.param.u64    %rd1, [a];
+    ld.param.u64    %rd2, [b];
+    ld.param.u64    %rd3, [out];
+    ld.param.u32    %r1, [n];
+
+    mov.u32         %r2, %ctaid.x;
+    mov.u32         %r3, %ntid.x;
+    mul.lo.u32      %r4, %r2, %r3;
+    mov.u32         %r5, %tid.x;
+    add.u32         %r4, %r4, %r5;
+    setp.ge.u32     %p1, %r4, %r1;
+    @%p1 bra        DONE;
+
+    mov.u32         %r8, 0;                // 累加器初值 0
+
+    mul.wide.u32    %rd4, %r4, 4;          // * sizeof(int32)
+    add.s64         %rd5, %rd1, %rd4;
+    add.s64         %rd6, %rd2, %rd4;
+    add.s64         %rd7, %rd3, %rd4;
+
+    ld.global.u32   %r5, [%rd5];
+    ld.global.u32   %r6, [%rd6];
+    dp4a.s32.s32    %r7, %r5, %r6, %r8;
+    st.global.u32   [%rd7], %r7;
+
+DONE:
+    ret;
+}

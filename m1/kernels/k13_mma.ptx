@@ -1,0 +1,82 @@
+.version 8.0
+.target sm_90
+.address_size 64
+
+// mma 测试 kernel:每块 1 warp(32 线程),每个 lane 按官方 fragment 布局
+// 从全局内存加载 A(16x16 f16 行主序)/ B(16x8 f16 列主序)/ C(16x8 f32),
+// 执行 mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32,D 写回全局。
+// 加载/存储代码本身 sm_61 兼容,只有 mma 一行会被降级器展开。
+.visible .entry mma_test(
+    .param .u64 a,
+    .param .u64 b,
+    .param .u64 c,
+    .param .u64 d)
+{
+    .reg .f32   %f<8>;
+    .reg .pred  %p<2>;
+    .reg .b32   %r<8>;
+    .reg .b32   %rbb<4>;                   // B fragment 装配用
+    .reg .b32   %ra<4>;
+    .reg .b32   %rb<2>;
+    .reg .b64   %rd<20>;
+
+    ld.param.u64    %rd1, [a];
+    ld.param.u64    %rd2, [b];
+    ld.param.u64    %rd3, [c];
+    ld.param.u64    %rd4, [d];
+
+    mov.u32         %r1, %tid.x;
+    and.b32         %r2, %r1, 31;          // lane
+    shr.u32         %r3, %r2, 2;           // g = lane>>2
+    and.b32         %r4, %r2, 3;           // t = lane&3
+
+    // A 寄存器(4 x f16x2):a0@32g+4t, a1=+256(行+8), a2=+16(列+8), a3=+256+16
+    mul.wide.u32    %rd5, %r3, 32;
+    mul.wide.u32    %rd6, %r4, 4;
+    add.s64         %rd7, %rd5, %rd6;
+    add.s64         %rd8, %rd1, %rd7;
+    ld.global.b32   %ra0, [%rd8];
+    add.s64         %rd9, %rd8, 256;
+    ld.global.b32   %ra1, [%rd9];
+    add.s64         %rd10, %rd8, 16;
+    ld.global.b32   %ra2, [%rd10];
+    add.s64         %rd11, %rd9, 16;
+    ld.global.b32   %ra3, [%rd11];
+
+    // B 寄存器(2 x f16x2):B 以 (k,n) 行主序存储,lane 取 (k=2t,n=g)。
+    // 为 4B 对齐,host 侧把 B 交错复制进 (k,n)→(k对, n) 的 u32 数组:
+    // u32[n][k/2] = pack(B[2j][n], B[2j+1][n]),字节偏移 = 2n*... 见测试脚本
+    // 布局:u32[(n * 8) + t] = half2(B[2t][n], B[2t+1][n]) → 偏移 = 4*(8g+t)
+    mul.wide.u32    %rd12, %r3, 32;        // g*32
+    mul.wide.u32    %rd13, %r4, 4;         // t*4
+    add.s64         %rd12, %rd12, %rd13;
+    add.s64         %rd12, %rd2, %rd12;
+    ld.global.b32   %rbb0, [%rd12];
+    add.s64         %rd13, %rd12, 16;      // k 对 +8 → t+4 → +16B
+    ld.global.b32   %rbb1, [%rd13];
+
+    // C 累加器(4 x f32):c0@32g+8t, c1=+4, c2=+256(行+8), c3=+260
+    mul.wide.u32    %rd14, %r4, 8;
+    add.s64         %rd15, %rd5, %rd14;
+    add.s64         %rd16, %rd3, %rd15;
+    ld.global.f32   %f4, [%rd16];
+    add.s64         %rd17, %rd16, 4;
+    ld.global.f32   %f5, [%rd17];
+    add.s64         %rd18, %rd16, 256;
+    ld.global.f32   %f6, [%rd18];
+    add.s64         %rd19, %rd18, 4;
+    ld.global.f32   %f7, [%rd19];
+
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 %f0, %f1, %f2, %f3, %ra0, %ra1, %ra2, %ra3, %rbb0, %rbb1, %f4, %f5, %f6, %f7;
+
+    // D 写回地址 = d + 32g+8t(+4/+256/+260);rd15 = 32g+8t 仍有效
+    add.s64         %rd16, %rd4, %rd15;
+    add.s64         %rd17, %rd16, 4;
+    add.s64         %rd18, %rd16, 256;
+    add.s64         %rd19, %rd18, 4;
+    st.global.f32   [%rd16], %f0;
+    st.global.f32   [%rd17], %f1;
+    st.global.f32   [%rd18], %f2;
+    st.global.f32   [%rd19], %f3;
+    ret;
+}

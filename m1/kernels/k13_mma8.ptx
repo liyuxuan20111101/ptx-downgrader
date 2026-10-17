@@ -1,0 +1,78 @@
+.version 8.0
+.target sm_90
+.address_size 64
+
+// m16n8k8 (f32.f16.f16.f32) 验证 kernel。
+// k8 的 fragment 布局(PTX ISA 文档,mma.m16n8k8 一节):
+//   A: 2 个 .f16x2 寄存器 a0,a1 —— a0 = (row=g, col=2t),(row=g, col=2t+1);
+//      a1 = row g+8 同列(即 k16 布局去掉 word2/3,每 lane 只持 k=0..7)
+//   B: 1 个 .f16x2 寄存器 b0 —— (row=2t, col=g),(row=2t+1, col=g)
+//   C/D: 同 k16(4 x .f32)
+// 本 kernel 每 warp(32 线程)按布局从全局内存装载,执行 mma,D 写回。
+.visible .entry mma8_test(
+    .param .u64 a,
+    .param .u64 b,
+    .param .u64 c,
+    .param .u64 d)
+{
+    .reg .f32   %f<8>;
+    .reg .b32   %r<8>;
+    .reg .b32   %ra<2>;
+    .reg .b32   %rbb<1>;
+    .reg .b64   %rd<16>;
+
+    ld.param.u64    %rd1, [a];
+    ld.param.u64    %rd2, [b];
+    ld.param.u64    %rd3, [c];
+    ld.param.u64    %rd4, [d];
+
+    mov.u32         %r1, %tid.x;
+    and.b32         %r2, %r1, 31;          // lane
+    shr.u32         %r3, %r2, 2;           // g = lane>>2
+    and.b32         %r4, %r2, 3;           // t = lane&3
+
+    // A(2 x f16x2):A 按 (m,k) 行主序 16x8,行距 8 半字 = 16B;
+    // lane 4g+t 取行 g 列 (2t,2t+1) = 字节偏移 16g+4t;行 g+8 = +128B
+    mul.wide.u32    %rd5, %r3, 16;
+    mul.wide.u32    %rd6, %r4, 4;
+    add.s64         %rd7, %rd5, %rd6;
+    add.s64         %rd8, %rd1, %rd7;
+    ld.global.b32   %ra0, [%rd8];          // (g, 2t),(g, 2t+1)
+    add.s64         %rd9, %rd8, 128;
+    ld.global.b32   %ra1, [%rd9];          // (g+8, 2t),(g+8, 2t+1)
+
+    // B(1 字):B 按 (k,n) 行主序,交错包 u32[(n*4)+t] = (B[2t][n],B[2t+1][n])
+    mul.wide.u32    %rd10, %r3, 16;        // n=g → g*4 个 u32 = 16g 字节
+    mul.wide.u32    %rd11, %r4, 4;         // t
+    add.s64         %rd12, %rd10, %rd11;
+    add.s64         %rd12, %rd2, %rd12;
+    ld.global.b32   %rbb0, [%rd12];
+
+    // C(4 x f32):C/D 16x8 行主序,行距 32B;
+    // c0 = (g, 2t) @ 32g+8t,c1 = +4,c2/c3 = 行 g+8 = +256B
+    mul.wide.u32    %rd13, %r3, 32;        // 32g(C/D 行距 32B,与 A 的 16g 不同)
+    mul.wide.u32    %rd14, %r4, 8;
+    add.s64         %rd14, %rd13, %rd14;
+    add.s64         %rd15, %rd3, %rd14;
+    ld.global.f32   %f4, [%rd15];
+    add.s64         %rd15, %rd15, 4;
+    ld.global.f32   %f5, [%rd15];
+    add.s64         %rd15, %rd15, 252;     // 行 g+8 = 32B/行 × 8 行 = +256(相对 c0)
+    ld.global.f32   %f6, [%rd15];
+    add.s64         %rd15, %rd15, 4;
+    ld.global.f32   %f7, [%rd15];
+
+    mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 %f0, %f1, %f2, %f3, %ra0, %ra1, %rbb0, %f4, %f5, %f6, %f7;
+
+    // D 写回(d 基址):d0/d1 @ 32g+8t(+4),d2/d3 = 行 g+8 = +128B
+    ld.param.u64    %rd4, [d];
+    add.s64         %rd15, %rd4, %rd14;
+    st.global.f32   [%rd15], %f0;
+    add.s64         %rd15, %rd15, 4;
+    st.global.f32   [%rd15], %f1;
+    add.s64         %rd15, %rd15, 252;     // 行 g+8 = +256(相对 d0)
+    st.global.f32   [%rd15], %f2;
+    add.s64         %rd15, %rd15, 4;
+    st.global.f32   [%rd15], %f3;
+    ret;
+}

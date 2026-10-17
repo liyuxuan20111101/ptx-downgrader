@@ -1,0 +1,46 @@
+.version 7.0
+.target sm_61
+.address_size 64
+
+// fp16 降级演示:输入 half2 打包数组(每 u32 两个 fp16),
+// 输出 = 输入 * {1.0, 0.5}(低位乘 1.0,高位乘 0.5)。
+// 模拟"新架构 mma fp16 指令降级为 Pascal f16 FMA"后的算子形态。
+.visible .entry half_scale(
+    .param .u64 src,
+    .param .u64 dst,
+    .param .u32 n)
+{
+    .reg .pred  %p<2>;
+    .reg .b32   %r<8>;
+    .reg .b64   %rd<10>;
+    .reg .f16   %h<8>;
+
+    ld.param.u64    %rd1, [src];
+    ld.param.u64    %rd2, [dst];
+    ld.param.u32    %r1, [n];
+
+    mov.u32         %r2, %ctaid.x;
+    mov.u32         %r3, %ntid.x;
+    mul.lo.u32      %r4, %r2, %r3;
+    mov.u32         %r5, %tid.x;
+    add.u32         %r4, %r4, %r5;
+    setp.ge.u32     %p1, %r4, %r1;
+    @%p1 bra        DONE;
+
+    mov.b16         %h5, 0x3C00;           // fp16 1.0
+    mov.b16         %h6, 0x3800;           // fp16 0.5
+
+    mul.wide.u32    %rd4, %r4, 4;          // * sizeof(half2)
+    add.s64         %rd5, %rd1, %rd4;
+    add.s64         %rd6, %rd2, %rd4;
+
+    ld.global.b32   %r5, [%rd5];
+    mov.b32         {%h1, %h2}, %r5;       // 解包 half2
+    mul.rn.f16      %h3, %h1, %h5;
+    mul.rn.f16      %h4, %h2, %h6;
+    mov.b32         %r6, {%h3, %h4};       // 重新打包
+    st.global.b32   [%rd6], %r6;
+
+DONE:
+    ret;
+}

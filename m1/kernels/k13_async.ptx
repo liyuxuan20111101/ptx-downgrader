@@ -1,0 +1,57 @@
+.version 8.0
+.target sm_90
+.address_size 64
+
+// "Ampere/CUDA 13 风格"输入:cp.async 全局→共享搬运,
+// cp-size 16、src-size 8(尾部 8 字节零填充),commit_group + wait_group 0。
+// 语义:每线程 16B 输出 = 源 8B + 8B 零,再按 f32 ×2.0 写回全局。
+.visible .entry async_copy(
+    .param .u64 src,
+    .param .u64 dst,
+    .param .u32 n_tiles)
+{
+    .reg .pred  %p<2>;
+    .reg .f32   %f<6>;
+    .reg .b32   %r<12>;
+    .reg .b64   %rd<12>;
+    .shared .align 16 .b8 tile[1024];
+
+    ld.param.u64    %rd1, [src];
+    ld.param.u64    %rd2, [dst];
+    ld.param.u32    %r1, [n_tiles];
+
+    mov.u32         %r2, %ctaid.x;
+    mov.u32         %r3, %ntid.x;
+    mul.lo.u32      %r4, %r2, %r3;
+    add.u32         %r4, %r4, %tid.x;
+    setp.ge.u32     %p1, %r4, %r1;
+    @%p1 bra        DONE;
+
+    mul.wide.u32    %rd5, %r4, 16;        // 全局字节偏移(用全局 tile 索引)
+    mov.u32         %r5, %tid.x;          // 共享内存偏移必须用块内 tid
+    mul.wide.u32    %rd9, %r5, 16;
+    add.s64         %rd6, %rd1, %rd5;
+    mov.u64         %rd7, tile;
+    add.s64         %rd7, %rd7, %rd9;
+
+    cp.async.ca.shared.global [%rd7], [%rd6], 16, 8;
+    cp.async.commit_group;
+    cp.async.wait_group 0;
+
+    ld.shared.f32   %f1, [%rd7+0];
+    ld.shared.f32   %f2, [%rd7+4];
+    ld.shared.f32   %f3, [%rd7+8];
+    ld.shared.f32   %f4, [%rd7+12];
+    mul.f32         %f1, %f1, 0f40000000;
+    mul.f32         %f2, %f2, 0f40000000;
+    mul.f32         %f3, %f3, 0f40000000;
+    mul.f32         %f4, %f4, 0f40000000;
+    add.s64         %rd8, %rd2, %rd5;
+    st.global.f32   [%rd8+0], %f1;
+    st.global.f32   [%rd8+4], %f2;
+    st.global.f32   [%rd8+8], %f3;
+    st.global.f32   [%rd8+12], %f4;
+
+DONE:
+    ret;
+}

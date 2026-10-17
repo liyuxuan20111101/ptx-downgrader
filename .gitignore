@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# NVIDIA tools (auto-downloaded by setup_tools.py, ~60MB)
+tools/cuda_cuobjdump-*-archive/
+tools/cuda_nvcc-*-archive/
+tools/redist*.json
+tools/nvcc.zip
+tools/cudobj13.zip
+tools/cuobjdump.zip
+
+# Extracted binaries and dumps (large, user-provided or generated)
+tools/llama_extract/
+tools/full_ptx.txt
+tools/ptx_isa.pdf
+tools/lc_releases.json
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

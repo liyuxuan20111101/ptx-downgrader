@@ -1,0 +1,41 @@
+.version 7.0
+.target sm_61
+.address_size 64
+
+// c[i] = a[i] + b[i], float32
+.visible .entry vec_add(
+    .param .u64 a,
+    .param .u64 b,
+    .param .u64 c,
+    .param .u32 n)
+{
+    .reg .f32   %f<4>;
+    .reg .pred  %p<2>;
+    .reg .b32   %r<8>;
+    .reg .b64   %rd<12>;
+
+    ld.param.u64    %rd1, [a];
+    ld.param.u64    %rd2, [b];
+    ld.param.u64    %rd3, [c];
+    ld.param.u32    %r1, [n];
+
+    mov.u32         %r2, %ctaid.x;
+    mov.u32         %r3, %ntid.x;
+    mul.lo.u32      %r4, %r2, %r3;
+    mov.u32         %r5, %tid.x;           // ISA 7.0: 特殊寄存器不能直接做 add 操作数
+    add.u32         %r4, %r4, %r5;         // global index
+    setp.ge.u32     %p1, %r4, %r1;
+    @%p1 bra        DONE;
+
+    mul.wide.u32    %rd4, %r4, 4;          // * sizeof(float)
+    add.s64         %rd5, %rd1, %rd4;
+    add.s64         %rd6, %rd2, %rd4;
+    add.s64         %rd7, %rd3, %rd4;
+    ld.global.f32   %f1, [%rd5];
+    ld.global.f32   %f2, [%rd6];
+    add.f32         %f3, %f1, %f2;
+    st.global.f32   [%rd7], %f3;
+
+DONE:
+    ret;
+}
