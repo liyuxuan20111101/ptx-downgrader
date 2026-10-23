@@ -11,17 +11,27 @@ CUOBJDUMP = os.path.join(HERE, "..", "tools",
 
 
 def _split_blobs(lines):
-    """Split the cuobjdump dump on 'arch = sm_XX' header lines."""
+    """Split the cuobjdump dump on 'arch = sm_XX' header lines.
+
+    cuobjdump 在 arch 行后先输出元数据(code version/host/compile_size/
+    compressed…),再输出 PTX 正文;元数据行不是 '.' 指令,渲染进产物会让
+    ptxas 报语法错。因此每个 blob 跳到第一个 '.' 开头的行才开始收集。
+    """
     blobs = []
-    cur_arch, cur_lines = None, []
+    cur_arch, cur_lines, collecting = None, [], False
     for ln in lines:
         m = re.match(r"\s*arch\s*=\s*(sm_\d+)", ln)
         if m:
             if cur_arch and cur_lines:
                 blobs.append((cur_arch, "\n".join(cur_lines)))
-            cur_arch, cur_lines = m.group(1), []
+            cur_arch, cur_lines, collecting = m.group(1), [], False
             continue
         if cur_arch is not None:
+            if not collecting:
+                if ln.lstrip().startswith("."):
+                    collecting = True
+                else:
+                    continue
             cur_lines.append(ln)
     if cur_arch and cur_lines:
         blobs.append((cur_arch, "\n".join(cur_lines)))

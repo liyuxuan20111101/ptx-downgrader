@@ -94,7 +94,11 @@ class App:
         self.log.pack(fill="both", expand=True, padx=8, pady=4)
 
     # ------------------------------------------------------------- helpers
+    # tkinter 不是线程安全的:工作线程只投递 after,所有控件操作都在主线程执行。
     def say(self, msg):
+        self.root.after(0, self._say, msg)
+
+    def _say(self, msg):
         self.log.configure(state="normal")
         self.log.insert("end", msg + "\n")
         self.log.see("end")
@@ -158,13 +162,20 @@ class App:
             for arch, text in blobs:
                 self.say(f"  发现 PTX 段: {arch} "
                          f"({len(split_modules(text))} 个 kernel)")
+                # cuobjdump 拼接输出里同名 kernel 会出现,重名加序号防覆盖
+                seen = {}
                 for i, mtext in enumerate(split_modules(text)):
                     km = _safe_name(_kernel_name(mtext) or f"kernel_{arch}_{i}")
+                    n = seen.get(km, 0)
+                    seen[km] = n + 1
+                    if n:
+                        km = f"{km}_{n + 1}"
                     out = _safe_join(in_dir, f"downgraded_{arch}_{km}.ptx")
                     tasks.append((f"{arch}/{km}", mtext, out))
 
         ok_all, fail = 0, 0
-        self.progress.configure(maximum=max(len(tasks), 1), value=0)
+        self.root.after(0, lambda: self.progress.configure(
+            maximum=max(len(tasks), 1), value=0))
         for name, text, out in tasks:
             try:
                 mod = parse_module(text)
@@ -194,7 +205,7 @@ class App:
             except UnsupportedError as e:
                 fail += 1
                 self.say(f"  [拒绝] {name}: {e}")
-            self.progress.step(1)
+            self.root.after(0, self.progress.step, 1)
 
         self.say("")
         self.say(f"完成: {ok_all} 成功, {fail} 失败/拒绝, 共 {len(tasks)} 个 kernel。")
@@ -208,7 +219,11 @@ def _kernel_name(ptx_text):
     for ln in ptx_text.splitlines():
         s = ln.strip()
         if s.startswith(".visible .entry") or s.startswith(".entry"):
-            return s.split()[2].lstrip("$") if len(s.split()) > 2 else None
+            parts = s.split()
+            idx = parts.index(".entry") + 1
+            if len(parts) > idx:
+                return parts[idx].split("(")[0].lstrip("$")
+            return None
     return None
 
 
