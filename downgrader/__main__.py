@@ -27,13 +27,19 @@ def _safe_out(p):
 def main():
     ap = argparse.ArgumentParser(
         description="PTX 降级器:把高代架构 PTX 重写为低代目标可加载的形式")
-    ap.add_argument("input")
+    ap.add_argument("input", nargs="?", default=None)
     ap.add_argument("-o", "--output", default=None)
     ap.add_argument("--no-validate", action="store_true")
+    ap.add_argument("--gui", action="store_true",
+                    help="启动图形界面(免命令行,开箱即用)")
     ap.add_argument("--target", default="sm_61",
                     help="降级目标架构:sm_61 (Pascal) / sm_70 / sm_75 / "
                          "sm_80 / sm_86 (Ampere, 30系) / sm_89 (Ada)")
     args = ap.parse_args()
+
+    if args.gui or args.input is None:
+        from .gui import main as gui_main
+        return gui_main()
 
     src = open(args.input, encoding="utf-8").read()
     try:

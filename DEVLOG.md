@@ -193,3 +193,25 @@ CUDA 13 删除了 sm_61 编译目标,但:
 - 半成品教训:ldmatrix 展开写到一半发现读回寻址需要跨 lane 索引推导,
   与 redux.sync 的 shfl 谓词返回问题同级。诚实做法是删除草稿、只保留
   明确拒绝,README 不写做不到的事。
+
+## v0.3.1 开发记录(2026-10-23)—— 图形界面 + .version 分级修复
+
+- **GUI 上线**(downgrader/gui.py,纯 tkinter 零依赖):文件选择(.dll/.so/
+  .cubin/.fatbin/.ptx)→ 目标架构下拉 → 一键降级 + ptxas 校验 → 按 kernel
+  实时日志 + 进度条。产物固定写输入文件同目录。
+- 新增 downgrader/extract.py:fatbin PTX 提取模块(从 survey.py 消重),
+  survey.py 改为复用;CLI 无参数或 --gui 时启动 GUI;根目录加 run_gui.bat /
+  run_gui.sh 双击启动器。
+- **真 bug 修复:.version 必须按目标分级**。原实现无条件把 .version 压到 7.0,
+  但 ptxas(连 CUDA 13 的也一样)对 .target sm_86/sm_89 强制要求 .version
+  >= 8.0("PTX .version 7.0 does not support .target sm_86"),即 v0.3.0 的
+  sm_86/89 目标产物 ptxas 校验必然失败。实测矩阵(13.0 ptxas):sm_86/89 需
+  8.0;sm_80 可 7.0;11.4 ptxas:sm_61/70/75 均 6.3/7.0 可。现按目标取最低
+  可接受版本(6.3/7.0/8.0),全 6 目标 ptxas 校验通过。
+- 顺手加固:parser 的 .address_size 缺省值从 None 改为 64(真实 fatbin 恒带
+  该行;手写输入缺行时原先渲染出字面 "None" 直接语法错误)。
+- 安全审查修两处:GUI 输出路径全部走 _safe_name(文件名白名单)+ _safe_join
+  (realpath + 包含校验);extract.py 只接受白名单扩展名的真实文件。
+- 回归:三 mma 模拟器 VERIFIED、test_e2e 全过、int8 k32 GPU 128/128、
+  fatbin→提取→降级→校验全链路(fatbinary 11.4 自造 sm_86 fatbin 实测)、
+  tkinter 真窗口冒烟通过。

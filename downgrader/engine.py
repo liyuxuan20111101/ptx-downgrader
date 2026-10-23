@@ -434,9 +434,14 @@ def downgrade_module(mod, target="sm_61"):
     if target not in SUPPORTED_TARGETS:
         raise UnsupportedError(
             f"不支持的降级目标 {target};可选:{', '.join(SUPPORTED_TARGETS)}")
-    if mod["version"] and float(mod["version"]) > 7.0:
-        warns.append(f".version {mod['version']} → 7.0")
-    mod["version"] = "7.0"
+    # .version 按目标取目标代 ptxas 可接受的最低版本:
+    #   sm_61/70/75 → 6.3,sm_80 → 7.0,sm_86/89 → 8.0
+    # (实测 13.0 ptxas 报 "PTX .version 7.0 does not support .target sm_86")
+    out_ver = ("6.3" if _arch_num(target) <= 75
+               else ("7.0" if target == "sm_80" else "8.0"))
+    if mod["version"] and float(mod["version"]) > float(out_ver):
+        warns.append(f".version {mod['version']} → {out_ver}")
+    mod["version"] = out_ver
     old_target = mod["target"]
     mod["target"] = target
     if old_target and old_target != target:

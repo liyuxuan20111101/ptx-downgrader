@@ -132,7 +132,9 @@ def _parse_body(lines, i):
 def parse_module(text):
     text = strip_comments(text)
     lines = text.splitlines()
-    mod = {"version": None, "target": None, "addr_size": None,
+    # addr_size 缺省 64:fatbin 导出的 PTX 恒带 .address_size 64;
+    # 无该行的手写输入按 CUDA 默认 64 处理,渲染时同样输出。
+    mod = {"version": None, "target": None, "addr_size": "64",
            "header": [], "entries": []}
 
     i = 0
@@ -180,8 +182,9 @@ def parse_module(text):
 
 def render_module(mod):
     out = [f".version {mod['version']}",
-           f".target {mod['target']}",
-           f".address_size {mod['addr_size']}"]
+           f".target {mod['target']}"]
+    if mod.get("addr_size"):
+        out.append(f".address_size {mod['addr_size']}")
     out.extend(mod["header"])
     for e in mod["entries"]:
         out.append(f".visible .entry {e.name}({e.params}) {{")

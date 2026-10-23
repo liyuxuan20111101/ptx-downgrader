@@ -15,52 +15,8 @@ sys.path.insert(0, ROOT)
 
 from downgrader.parser import parse_module, UnsupportedError   # noqa: E402
 from downgrader.engine import downgrade_module                 # noqa: E402
-
-CUOBJDUMP = os.path.join(HERE, "cuda_cuobjdump-windows-x86_64-13.0.85-archive",
-                         "bin", "cuobjdump.exe")
-
-
-def _split_blobs(lines):
-    """Split the cuobjdump dump on 'arch = sm_XX' header lines."""
-    blobs = []
-    cur_arch, cur_lines = None, []
-    for ln in lines:
-        m = re.match(r"\s*arch\s*=\s*(sm_\d+)", ln)
-        if m:
-            if cur_arch and cur_lines:
-                blobs.append((cur_arch, "\n".join(cur_lines)))
-            cur_arch, cur_lines = m.group(1), []
-            continue
-        if cur_arch is not None:
-            cur_lines.append(ln)
-    if cur_arch and cur_lines:
-        blobs.append((cur_arch, "\n".join(cur_lines)))
-    return blobs
-
-
-def extract_ptx_from_text(path):
-    text = open(path, encoding="utf-8", errors="replace").read()
-    return _split_blobs(text.splitlines())
-
-
-def extract_ptx(dll):
-    # Only accept existing .dll/.so files; subprocess.run with an argument
-    # list (no shell), tolerating stray binary bytes in the output.
-    dll = os.path.realpath(os.path.abspath(dll))
-    if not (dll.endswith(".dll") or dll.endswith(".so")) or not os.path.isfile(dll):
-        raise SystemExit(f"input must be an existing .dll/.so file: {dll}")
-    completed = subprocess.run([CUOBJDUMP, "-ptx", dll], shell=False,
-                               capture_output=True,
-                               errors="replace")
-    if completed.returncode != 0 and not completed.stdout:
-        raise RuntimeError(completed.stderr[:500])
-    return _split_blobs(completed.stdout.splitlines())
-
-
-def split_modules(text):
-    """cuobjdump concatenates .entry blocks; split on .visible .entry."""
-    parts = re.split(r"(?=\.visible \.entry|\.\s*visible\s+\.entry)", text)
-    return [p for p in parts if ".entry" in p]
+from downgrader.extract import (extract_ptx, extract_ptx_from_text,  # noqa: E402,F401
+                                split_modules)
 
 
 def survey(blobs):

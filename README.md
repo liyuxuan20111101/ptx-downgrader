@@ -61,6 +61,16 @@ python setup_tools.py        # downloads cuobjdump + ptxas (~30 MB) from NVIDIA'
 
 ## Usage
 
+### GUI: point, click, done (no command line needed)
+
+```bash
+# Windows: double-click  run_gui.bat
+# Linux/macOS: ./run_gui.sh
+# or: python -m downgrader --gui      (running with no input also opens the GUI)
+```
+
+Pick a file containing an embedded CUDA fatbin (`.dll` / `.so` / `.cubin` / `.fatbin`) or a single `.ptx`, choose the target architecture, and hit **开始降级 (Downgrade)**. The GUI extracts every kernel's PTX, downgrades it, validates with ptxas, and writes `downgraded_<arch>_<kernel>.ptx` next to the input — with a per-kernel pass/reject log and progress bar. Standard-library tkinter only; no extra dependencies.
+
 ### CLI: downgrade a PTX file
 
 ```bash
@@ -101,7 +111,8 @@ python tools/sim_mma8.py
 ## Repository layout
 
 ```
-downgrader/     the library + CLI (parser, rule engine, mma expander, ptxas validator)
+downgrader/     the library + CLI + GUI (parser, rule engine, mma expander, ptxas validator)
+run_gui.bat     Windows double-click launcher for the GUI (run_gui.sh on Linux/macOS)
 m0/             feasibility spike: driver-JIT pipeline proof (3 kernels, zero toolchain)
 m1/             full e2e test suite: mixed kernels, mma k16/k8, cp.async, GPU golden tests
 m2/             real-world verification: llama.cpp fwht kernel, triple-checked on GPU
