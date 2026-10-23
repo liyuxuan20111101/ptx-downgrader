@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/liyuxuan20111101/ptx-downgrader/actions/workflows/ci.yml/badge.svg)](https://github.com/liyuxuan20111101/ptx-downgrader/actions/workflows/ci.yml)
 
-**Run CUDA 13-era PTX on Pascal GPUs (GTX 10-series, sm_61) by degrading modern PTX to ISA 7.0 — pure software, no driver patching, no signature hacks.**
+**Run CUDA 13-era PTX on pre-Turing GPUs — or any GPU whose driver stopped receiving native PTX — by degrading modern PTX to the target's ISA. Targets: sm_61 (Pascal/GTX 10-series), sm_70, sm_75, sm_80, sm_86 (Ampere/RTX 30-series), sm_89 (Ada). Pure software, no driver patching, no signature hacks.**
 
 When NVIDIA ended Pascal support (driver branch R580 was the last; CUDA 13 removed `sm_61` compilation targets), applications shipping only modern PTX or SASS stopped working on GTX 10-series GPUs. This project implements the missing link:
 
@@ -63,8 +63,9 @@ python setup_tools.py        # downloads cuobjdump + ptxas (~30 MB) from NVIDIA'
 ### CLI: downgrade a PTX file
 
 ```bash
-python -m downgrader input.ptx -o output.sm61.ptx
-# validates output with ptxas automatically
+python -m downgrader input.ptx -o output.sm61.ptx               # Pascal (default)
+python -m downgrader input.ptx --target sm_86                   # Ampere / RTX 30-series
+# validates output with ptxas automatically (when ptxas is present)
 ```
 
 ### Compatibility survey of a real fatbin
@@ -119,7 +120,7 @@ DEVLOG.md       full development log with every bug found and mechanism discover
 - cuBLAS/cuDNN ship SASS-only (no PTX): engines depending on them can't be downgraded. Self-contained kernel engines (llama.cpp with `-DGGML_CUDA_NO_CUBLAS`, or builds using `-arch=compute_61`) are the target use case.
 - Downgraded tensor-core code runs at scalar-FMA speed; expect a fraction of native mma throughput.
 - FMA accumulation order differs from hardware mma — results match within float tolerance, not bit-exact (except where the reference is also order-exact).
-- The `int8 mma` family and `ldmatrix/stmatrix` are rejected pending layout work.
+- The `int8 mma` family is rejected pending layout work (planned v0.2.x). `ldmatrix`/`redux.sync` expansion passes are tracked for v0.3.
 
 ## License
 

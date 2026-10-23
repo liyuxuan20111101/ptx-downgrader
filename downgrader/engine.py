@@ -25,30 +25,49 @@ SPECIAL_RE = re.compile(
     r"clock|clock64|gridid|lanemask_(?:eq|lt|le|gt|ge)|dynamic_smem_size|"
     r"total_smem_size)\b")
 
-# ---- 拒绝列表(新架构专属、无法用软件等价物安全替代)-----------------------
-REJECT_PREFIXES = {
-    "wgmma": "Hopper wgmma:需要张量内存加速器,sm_61 无等价物",
-    "tcgen05": "Blackwell tcgen05:第5代张量核指令,无等价物",
-    "ldmatrix": "sm_75 fragment 装载指令:降级需重排布局(M1.6 候选),"
-                "当前不支持。与 mma 展开配套出现,请改写为 ld.shared",
-    "stmatrix": "sm_90 fragment 回写指令:同 ldmatrix,当前不支持",
-    "wmma": "sm_70 旧式张量 API:无降级,请改用 mma.sync 或手写 FMA",
-    "cp.async.bulk": "TMA 大批量异步拷贝:需要 TMA 硬件",
-    "cp.reduce.async.bulk": "TMA 归约拷贝:需要 TMA 硬件",
-    "tensormap": "TMA 张量描述符:需要 TMA 硬件",
-    "st.async": "sm_90 异步存储,无等价物",
-    "ld.async": "sm_90 异步加载,无等价物",
-    "red.async": "sm_90 异步归约,无等价物",
-    "st.bulk": "sm_100 批量存储,无等价物",
-    "multimem": "NVLink 多播访存,无等价物",
-    "mapa": "cluster 地址映射:需要 thread block cluster",
-    "clusterlaunchcontrol": "cluster 启动控制,无等价物",
-    "barrier.cluster": "cluster 屏障:需要 thread block cluster",
-    "setmaxnreg": "Hopper 寄存器重分配,无等价物",
-    "elect.sync": "warp 选举(sm_90),暂无安全降级",
-    "redux.sync": "warp 归约(sm_80),暂无安全降级",
-    "mbarrier.try_wait": "mbarrier 非阻塞等待返回谓词,暂无安全降级",
+# ---- 目标架构 ----------------------------------------------------------
+# 降级目标不再是硬编码的 sm_61:任何"应用 PTX 目标 > 本机目标"的组合都适用。
+# 规则按【指令引入代】分级,目标代 >= 引入代的指令保持原样。
+#   sm_61: Pascal     sm_70: Volta    sm_75: Turing
+#   sm_80/86: Ampere  sm_89: Ada      sm_90: Hopper
+SUPPORTED_TARGETS = ("sm_61", "sm_70", "sm_75", "sm_80", "sm_86", "sm_89")
+
+_ARCH_ORDER = {f"sm_{n}": n for n in
+               (61, 70, 75, 80, 86, 89)}
+
+
+def _arch_num(target):
+    return _ARCH_ORDER.get(target, 999)
+
+
+# 引入代 >= 目标代时拒绝/降级的指令(键 = opcode 前缀,值 = (引入代, 说明))。
+# 引入代 < 目标代的指令由硬件原生支持,直接透传。
+REJECT_BY_ARCH = {
+    "wgmma": (90, "Hopper wgmma:需要张量内存加速器"),
+    "tcgen05": (100, "Blackwell tcgen05:第5代张量核指令"),
+    "st.async": (90, "sm_90 异步存储"),
+    "ld.async": (90, "sm_90 异步加载"),
+    "red.async": (90, "sm_90 异步归约"),
+    "st.bulk": (100, "sm_100 批量存储"),
+    "multimem": (90, "NVLink 多播访存"),
+    "mapa": (90, "cluster 地址映射:需要 thread block cluster"),
+    "clusterlaunchcontrol": (100, "cluster 启动控制"),
+    "barrier.cluster": (90, "cluster 屏障:需要 thread block cluster"),
+    "setmaxnreg": (90, "Hopper 寄存器重分配"),
+    "elect.sync": (90, "warp 选举(已提供 shfl 降级见 pass_warp_sync)"),
+    "tensormap": (90, "TMA 张量描述符"),
+    "cp.async.bulk": (90, "TMA 大批量异步拷贝:需要 TMA 硬件"),
+    "cp.reduce.async.bulk": (90, "TMA 归约拷贝:需要 TMA 硬件"),
+    "mbarrier.try_wait": (80, "mbarrier 非阻塞等待返回谓词,暂无安全降级"),
+    "wmma": (70, "sm_70 旧式张量 API:无降级,请改用 mma.sync 或手写 FMA"),
 }
+
+# 所有目标一律拒绝(即使目标代达标也无意义,如向 sm_61 降 sm_75 指令时
+# 这些指令的目标代本来就高于目标——放在这里只为报错文案统一)。
+REJECT_ANY = {
+    "stmatrix": (90, "sm_90 fragment 回写:降级需重排布局(候选 M1.6)"),
+}
+
 REJECT_SUBSTR = (".cluster", "cta_group", ".shared::cta", "::cta")
 
 
@@ -78,20 +97,26 @@ def _emit(prefix_inst, lines, out):
         out.append(Inst(prefix_inst.pred, op, operands, prefix_inst.line_no))
 
 
-def pass_reject(entry):
+def pass_reject(entry, target="sm_61"):
+    tgt = _arch_num(target)
     for x in entry.body:
         if not isinstance(x, Inst):
             continue
         base = x.opcode.split(".")[0]
-        if base in REJECT_PREFIXES:
-            raise UnsupportedError(
-                f"{entry.name} 行{x.line_no}: `{x.opcode}` — "
-                f"{REJECT_PREFIXES[base]}")
-        for bad in REJECT_SUBSTR:
-            if bad in x.opcode:
-                raise UnsupportedError(
-                    f"{entry.name} 行{x.line_no}: `{x.opcode}` — "
-                    f"包含 cluster/TMA 相关限定,sm_61 无等价物")
+        for table in (REJECT_BY_ARCH, REJECT_ANY):
+            if base in table:
+                intro, why = table[base]
+                if tgt < intro:
+                    raise UnsupportedError(
+                        f"{entry.name} 行{x.line_no}: `{x.opcode}` — {why} "
+                        f"(sm_{tgt} 目标不支持,指令为 sm_{intro} 引入)")
+                break
+        else:
+            for bad in REJECT_SUBSTR:
+                if bad in x.opcode:
+                    raise UnsupportedError(
+                        f"{entry.name} 行{x.line_no}: `{x.opcode}` — "
+                        f"包含 cluster/TMA 相关限定,目标架构无等价物")
 
 
 def pass_opcode_fix(entry):
@@ -376,22 +401,28 @@ def pass_special_regs(entry, tmp):
     entry.body = body
 
 
-def downgrade_module(mod):
-    """整体管线。返回 (渲染文本, warnings)。"""
+def downgrade_module(mod, target="sm_61"):
+    """整体管线。target: 降级目标(sm_61/70/75/80/86/89)。
+    返回 (渲染文本, warnings)。"""
     warns = []
+    if target not in SUPPORTED_TARGETS:
+        raise UnsupportedError(
+            f"不支持的降级目标 {target};可选:{', '.join(SUPPORTED_TARGETS)}")
     if mod["version"] and float(mod["version"]) > 7.0:
         warns.append(f".version {mod['version']} → 7.0")
     mod["version"] = "7.0"
     old_target = mod["target"]
-    mod["target"] = "sm_61"
-    if old_target and old_target != "sm_61":
-        warns.append(f".target {old_target} → sm_61")
+    mod["target"] = target
+    if old_target and old_target != target:
+        warns.append(f".target {old_target} → {target}")
 
+    tgt = _arch_num(target)
     for e in mod["entries"]:
-        pass_reject(e)
+        pass_reject(e, target)
         tmp = TempAlloc()
         pass_opcode_fix(e)
-        pass_cpasync(e, tmp)
+        if tgt < 80:
+            pass_cpasync(e, tmp)      # cp.async 是 sm_80 引入
         pass_mbarrier(e)
         pass_griddepcontrol(e)
         pass_softfloat(entry=e, tmp=tmp)

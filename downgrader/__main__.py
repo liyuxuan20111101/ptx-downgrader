@@ -25,21 +25,27 @@ def _safe_out(p):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="PTX → sm_61 降级器")
+    ap = argparse.ArgumentParser(
+        description="PTX 降级器:把高代架构 PTX 重写为低代目标可加载的形式")
     ap.add_argument("input")
     ap.add_argument("-o", "--output", default=None)
     ap.add_argument("--no-validate", action="store_true")
+    ap.add_argument("--target", default="sm_61",
+                    help="降级目标架构:sm_61 (Pascal) / sm_70 / sm_75 / "
+                         "sm_80 / sm_86 (Ampere, 30系) / sm_89 (Ada)")
     args = ap.parse_args()
 
     src = open(args.input, encoding="utf-8").read()
     try:
         mod = parse_module(src)
-        out_text, warns = downgrade_module(mod)
+        out_text, warns = downgrade_module(mod, target=args.target)
     except UnsupportedError as e:
         print(f"[不支持的指令] {e}", file=sys.stderr)
         sys.exit(2)
 
-    out_path = _safe_out(args.output or (args.input.rsplit(".", 1)[0] + ".sm61.ptx"))
+    suffix = "sm" + args.target[3:]
+    out_path = _safe_out(args.output or (args.input.rsplit(".", 1)[0]
+                                         + f".{suffix}.ptx"))
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(out_text)

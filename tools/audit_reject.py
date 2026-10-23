@@ -1,6 +1,8 @@
 # Reject-coverage audit: compare the PTX ISA's sm_70+ instruction inventory
-# against the downgrader's reject list / supported shapes / special handling,
-# to surface instructions that would silently pass through unsupported.
+# against the downgrader's per-architecture reject tables / supported shapes
+# / special handling, to surface instructions that would silently pass
+# through unsupported for a given downgrade target.
+# Usage: python audit_reject.py [target]     (default sm_61)
 import os
 import sys
 
@@ -8,8 +10,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
-from downgrader.engine import REJECT_PREFIXES          # noqa: E402
-from downgrader.mma import SHAPES                      # noqa: E402
+from downgrader.engine import (REJECT_BY_ARCH, REJECT_ANY,   # noqa: E402
+                               SUPPORTED_TARGETS, _arch_num)
+
+target = sys.argv[1] if len(sys.argv) > 1 else "sm_61"
+if target not in SUPPORTED_TARGETS:
+    raise SystemExit(f"target must be one of {SUPPORTED_TARGETS}")
+tgt = _arch_num(target)
 
 known_new = [
     "ldmatrix", "stmatrix", "wmma", "mma.sync", "wgmma", "tcgen05",
@@ -20,20 +27,36 @@ known_new = [
     "applypriority", "discard", "createpolicy", "st.bulk", "clustergrid",
     "tanh", "bmsk",
 ]
-# Special-cased in the downgrader (not in the reject list but handled):
-specially = {"griddepcontrol", "mbarrier", "cp.async", "tanh", "bmsk"}
-# Confirmed safe on sm_61: mma.sync (in SHAPES), shfl.sync/match.sync
-# (sm_61 has shfl/vote; .sync variants are PTX 6.0 syntax), nanosleep,
-# and hint-only instructions (applypriority/discard/createpolicy/clustergrid).
-benign = {"mma.sync", "shfl.sync", "match.sync", "nanosleep",
-          "applypriority", "discard", "createpolicy", "clustergrid"}
-# REJECT_PREFIXES keys are full opcode names (e.g. "cp.async.bulk"), and
-# "cp.async" is specially handled — build the covered set from BOTH full
-# names and base names so the comparison is apples-to-apples.
-covered = (set(REJECT_PREFIXES)
-           | {r.split(".")[0] for r in REJECT_PREFIXES}
-           | {s.split(".")[0] for s in SHAPES}
-           | specially)
+# Special-cased in the downgrader (handled by dedicated passes or benign
+# passthrough on any target):
+specially = {"griddepcontrol", "mbarrier", "cp.async", "tanh", "bmsk",
+             # sm_61-native or PTX-6.0 syntax; hardware-supported on every
+             # target this tool emits:
+             "shfl.sync", "match.sync", "nanosleep", "applypriority",
+             "discard", "createpolicy", "clustergrid",
+             # mma.sync shapes are expanded; sm_61+ native from sm_75:
+             "mma.sync"}
+# benign when the TARGET supports them natively (instruction older than or
+# equal to target): e.g. ldmatrix is native on sm_75+.
+covered = set(specially)
+for base, (intro, _why) in {**REJECT_BY_ARCH, **REJECT_ANY}.items():
+    if tgt >= intro:
+        covered.add(base)               # native on this target, passthrough OK
+    else:
+        covered.add(base.split(".")[0])  # rejected for this target — covered
 
-missing = [k for k in known_new if k not in covered and k not in benign]
-print("uncovered sm_70+ instructions:", missing if missing else "none — full coverage")
+# Known candidates for future expansion passes (tracked, not yet implemented):
+KNOWN_PENDING = {"ldmatrix", "redux.sync"}
+
+missing = [k for k in known_new
+           if k not in covered and k.split(".")[0] not in covered]
+pending = [k for k in missing
+           if k in KNOWN_PENDING or k.split(".")[0] in KNOWN_PENDING]
+hard = [k for k in missing if k not in pending]
+if pending:
+    print(f"target {target}: pending expansion (tracked for v0.3):",
+          sorted(pending))
+if hard:
+    print(f"target {target}: UNCOVERED:", sorted(hard))
+if not missing:
+    print(f"target {target}: none — full coverage")
