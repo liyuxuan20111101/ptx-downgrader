@@ -37,6 +37,7 @@ The `downgrader` package rewrites PTX at the text/IR level. Every transform is s
 | Mixed-width addresses `[base+reg32]` → materialize + `cvt.u64.u32` + `add.s64` | PTX 7.0 rejects 64-bit base + 32-bit register offset forms |
 | Special registers in ALU/addresses (`%tid.x` as operand) → materialize via `mov` | PTX 7.0 restriction |
 | Opcode fixes: `dp4a.lo` qualifier, `mov.f16` immediates, cache-hint stripping (`L1::evict_*`) | ISA 7.0 syntax differences |
+| int8 `mma.sync` (m16n8k32/m16n8k16/m8n8k16, s32 acc) → `dp4a` sequences | Quantized-inference workhorse; verified 128/128 exact on GTX 1070 |
 | Rejection with actionable errors: `wgmma`, `tcgen05`, TMA family, `ldmatrix/stmatrix`, `wmma`, clusters | No software equivalent at acceptable cost (for now) |
 
 Everything runs **entirely in user space**: no driver modification, no kernel-mode code, no signature patching. The output is plain PTX that ptxas compiles and the stock driver loads.
@@ -120,7 +121,7 @@ DEVLOG.md       full development log with every bug found and mechanism discover
 - cuBLAS/cuDNN ship SASS-only (no PTX): engines depending on them can't be downgraded. Self-contained kernel engines (llama.cpp with `-DGGML_CUDA_NO_CUBLAS`, or builds using `-arch=compute_61`) are the target use case.
 - Downgraded tensor-core code runs at scalar-FMA speed; expect a fraction of native mma throughput.
 - FMA accumulation order differs from hardware mma — results match within float tolerance, not bit-exact (except where the reference is also order-exact).
-- The `int8 mma` family is rejected pending layout work (planned v0.2.x). `ldmatrix`/`redux.sync` expansion passes are tracked for v0.3.
+- `ldmatrix`/`redux.sync`/`elect.sync` expansion passes are tracked for v0.4.
 
 ## License
 
