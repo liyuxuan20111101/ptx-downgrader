@@ -53,7 +53,7 @@ def main():
         print(f"[改写] {w}")
 
     if not args.no_validate:
-        ok, err = validate(out_path)
+        ok, err = validate(out_path, arch=args.target)
         if ok:
             print(f"[ptxas] {out_path}: 校验通过")
         else:

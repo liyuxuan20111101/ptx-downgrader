@@ -72,12 +72,14 @@ REJECT_SUBSTR = (".cluster", "cta_group", ".shared::cta", "::cta")
 
 
 class TempAlloc:
-    """每入口的临时寄存器分配器:追加独立命名的声明向量,避免与原寄存器冲突。"""
+    """每入口的临时寄存器分配器:追加独立命名的声明向量,避免与原寄存器冲突。
+    get("32u") 返回 .u32 声明的寄存器(shl/shr 的移位量要求 .u32 类型)。"""
     def __init__(self):
         self.counters = {}
 
     def get(self, bits):
-        base = {32: "%rdg", 64: "%rddg"}[bits]
+        base = {32: "%rdg", "32u": "%rgu", 64: "%rddg",
+                "pred": "%rgp"}[bits]
         n = self.counters.get(bits, 0)
         self.counters[bits] = n + 1
         return f"{base}{n}"
@@ -86,8 +88,12 @@ class TempAlloc:
         out = []
         if self.counters.get(32):
             out.append(f".reg .b32 %rdg<{self.counters[32]}>;")
-        if self.counters.get(64):
+        if self.counters.get("32u"):
+            out.append(f".reg .u32 %rgu<{self.counters['32u']}>;")
+        if self.counters.get("64"):
             out.append(f".reg .b64 %rddg<{self.counters[64]}>;")
+        if self.counters.get("pred"):
+            out.append(f".reg .pred %rgp<{self.counters['pred']}>;")
         return out
 
 
@@ -296,25 +302,45 @@ def pass_softfloat(entry, tmp):
                 body.append(Inst(x.pred, "mov.f32", [d, t], x.line_no))
             continue
         if x.opcode.startswith("bmsk"):
-            # bmsk.clamp.b32 d, a, len, off → d = (a >> off) & ((1<<len)-1)
-            # len/off 是指令格式的 8 位立即数,掩码在降级期算成常量
-            # (运行期 shl 立即数会触发 ptxas 的类型推断问题)
-            if len(x.operands) != 4:
+            # 官方语义(PTX ISA 9.0 §9.7.1.23,ISA 7.6 / sm_70+ 引入):
+            # bmsk.mode.b32 d, a, b —— 生成从位 a 起宽 b 的位掩码:
+            #   a1 = a & 0x1f; mask0 = ~0 << a1
+            #   b1 = b & 0x1f; sum = a1 + b1
+            #   mask1 = ~0 << sum;若 sum 回绕(sum < a1)→ mask1 = 0
+            #   .clamp 且 a >= 32 → mask0 = 0
+            #   b1 == 0 → mask1 = ~0(由 shl 结果自然得出:~0 << 0 = ~0 ✓)
+            #   d = mask0 & ~mask1
+            # 降级序列(sm_61 原生指令,类型规则:移位 .b32/.u32 任意池,
+            # 算术 sub.u32,逻辑 and.b32/setp 带 .u32):
+            if len(x.operands) != 3:
                 raise UnsupportedError(
-                    f"{entry.name} 行{x.line_no}: bmsk 操作数异常")
-            d, a, ln_, of_ = x.operands
-            try:
-                mask = (1 << (int(ln_, 0) & 31)) - 1
-            except ValueError:
-                raise UnsupportedError(
-                    f"{entry.name} 行{x.line_no}: bmsk 的 len 必须是立即数")
-            t1 = tmp.get(32)
-            t2 = tmp.get(32)
-            body.extend([
-                Inst(x.pred, "shr.u32", [t1, a, of_], x.line_no),
-                Inst(x.pred, "mov.u32", [t2, str(mask)], x.line_no),
-                Inst(x.pred, "and.b32", [d, t1, t2], x.line_no),
-            ])
+                    f"{entry.name} 行{x.line_no}: bmsk 应为三操作数 "
+                    f"d, a, b(官方语法 bmsk.mode.b32)")
+            d, a, b = x.operands
+            wrap = ".wrap" in x.opcode
+            t = [tmp.get(32) for _ in range(4)]
+            p = tmp.get("pred")
+            seq = [
+                Inst(x.pred, "and.b32", [t[0], a, "31"], x.line_no),    # a1
+                Inst(x.pred, "mov.b32", [t[1], "-1"], x.line_no),
+                Inst(x.pred, "shl.b32", [t[1], t[1], t[0]], x.line_no),  # mask0
+                Inst(x.pred, "and.b32", [t[2], b, "31"], x.line_no),    # b1
+                Inst(x.pred, "add.u32", [t[3], t[0], t[2]], x.line_no),  # sum
+                # sum 回绕检测:无符号加法 sum < a1 即回绕 → mask1 = 0
+                Inst(x.pred, "setp.lo.u32", [p, t[3], t[0]], x.line_no),
+                Inst(x.pred, "selp.u32", [t[3], "0", "-1", p], x.line_no),
+                # mask1 = mask1_sel << sum(回绕时 sel=0 → mask1=0;
+                # b1==0 时 sum==a1 → ~0<<a1,后续 ~mask1 恰好补全 ✓)
+                Inst(x.pred, "shl.b32", [t[3], t[3], t[3]], x.line_no),
+                Inst(x.pred, "not.b32", [t[3], t[3]], x.line_no),        # ~mask1
+                Inst(x.pred, "and.b32", [d, t[1], t[3]], x.line_no),     # d
+            ]
+            if not wrap:                          # .clamp:a >= 32 → mask0 = 0
+                seq.insert(3, Inst(x.pred, "setp.hi.u32",
+                                   [p, a, "31"], x.line_no))
+                seq.insert(4, Inst(x.pred, "selp.u32",
+                                   [t[1], "0", t[1], p], x.line_no))
+            body.extend(seq)
             continue
         body.append(x)
     entry.body = body
