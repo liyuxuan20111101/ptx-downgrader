@@ -15,6 +15,10 @@ SHAPES = {
     "mma.sync.aligned.m16n8k16.row.col.f32.tf32.tf32.f32": (16, "tf32", "f32"),
     "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32": (8, "f16", "f32"),
     "mma.sync.aligned.m16n8k8.row.col.f16.f16.f16.f16": (8, "f16", "f16"),
+    # int8 家族(s32 累加器):布局见 tools/sim_mma8i.py
+    "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32": (32, "s8", "s32"),
+    "mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32": (16, "s8", "s32"),
+    "mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32": (16, "s8", "s32"),
 }
 SHARED_BYTES_PER_WARP = 24 * 32          # lane 存 4 个 A 字 + 2 个 B 字
 WARPS = 32                               # 静态共享缓冲按 32 warp 预留
@@ -27,7 +31,17 @@ DECLS = [
     ".reg .f16 %dgmh<4>;",
     ".reg .b16 %dgmw<4>;",
     ".reg .f32 %dgmf<28>;",
+    ".reg .b32 %dgmi<8>;",       # int8 dp4a 累加器(d0..d3)+ 临时
 ]
+
+# int8 mma(k32)专用:lane 存 A 4 字 + B 2 字(与 float 系同槽位)。
+# 展开时每 lane 组 4g+j 的 w0/w1 与 B 列的 b0/b1 做 dp4a。
+# 累加器池 %dgmi<8>:d0..d3 = dgmi0..3,余 4 个作 ld.shared 缓冲。
+
+
+def _gen_int8_entry(inst, k_len):
+    """int8 mma 入口分发(m16n8k32 / m16n8k16)。"""
+    return _gen_int8(inst, k_len)
 
 
 def _gen(inst, k_len, itype, atype):
@@ -204,6 +218,142 @@ def _gen(inst, k_len, itype, atype):
     return L
 
 
+def _gen_int8(inst, k_len):
+    """int8 mma(s32 累加器)的 dp4a 展开。
+    布局(sim_mma8i.py 已对拍):
+      lane 4g+t 存(A 均为 4 字,B 均为 2 字):
+        k32: w0=(g,4t..+3) w1=(g,4t+16..+3) w2/w3=行 g+8 同列;B: b0=(4t..+3,g) b1=(4t+16..+3,g)
+        k16: w0=(g,4t..+3) w1=行 g+8 同列;B: b0=(4t..+3,g)(单寄存器)
+        m8n8k16: 行范围 0..7(见下方处理说明)
+    读侧 dp4a 配对(列 2t / 2t+1):
+      j=0..(k/8-1):
+        a = lane 4g+j 的 w0(k=8j..8j+3 与 8j+4..8j+7 两半)—— k32 时
+            w0 是 4 字节 = k=4j..4j+3?—— 以模拟器为准:
+        k32: a_lo = w0(k=4j..4j+3), a_hi = w1(k=16+4j..+3)
+             b_lo = lane 8t+j 的 b0, b_hi = 同 lane 的 b1,
+             列 2t+1 用 lane 8t+4+j。
+    dp4a.s32.s32 d, a, b, c:c += Σ a[i]*b[i](4 字节点积)。
+    """
+    ops = inst.operands
+    # s32 累加器操作数:D4 + A4 + B(2 或 1)+ C4
+    k8 = (k_len == 16 and False)  # 占位:k32 → B 2 字;k16 → B 1 字
+    if k_len == 32:
+        n_expect = 14             # D4 + A4 + B2 + C4
+        if len(ops) != n_expect:
+            raise UnsupportedError(
+                f"行{inst.line_no}: mma(k32 s8) 操作数 {len(ops)} != {n_expect}")
+        d, a, b, c = ops[0:4], ops[4:8], ops[8:10], ops[10:14]
+    elif k_len == 16:
+        n_expect = 11             # D4 + A4 + B1 + C4(m16n8k16 s8:B 单字)
+        if len(ops) != n_expect:
+            raise UnsupportedError(
+                f"行{inst.line_no}: mma(k16 s8) 操作数 {len(ops)} != {n_expect}")
+        d, a, b, c = ops[0:4], ops[4:8], ops[8:9], ops[9:11]
+    else:
+        raise UnsupportedError(f"行{inst.line_no}: int8 k={k_len} 未支持")
+    W = [f"%dgmb{i}" for i in range(48)]
+    D = [f"%dgmd{i}" for i in range(12)]
+    L = []
+
+    def emit(op, *operands):
+        L.append(Inst(inst.pred, op, list(operands), inst.line_no))
+
+    # ---- 线性 tid / lane / warp / g / t(同 float 路径)----
+    emit("mov.u32", W[0], "%tid.x")
+    emit("mov.u32", W[1], "%ntid.x")
+    emit("mov.u32", W[2], "%tid.y")
+    emit("mov.u32", W[3], "%ntid.y")
+    emit("mov.u32", W[4], "%tid.z")
+    emit("mul.lo.u32", W[5], W[2], W[1])
+    emit("mul.lo.u32", W[6], W[1], W[3])
+    emit("mul.lo.u32", W[7], W[6], W[4])
+    emit("add.u32", W[8], W[0], W[5])
+    emit("add.u32", W[8], W[8], W[7])
+    emit("and.b32", W[9], W[8], "31")
+    emit("shr.u32", W[10], W[8], "5")
+    emit("shr.u32", W[11], W[9], "2")
+    emit("and.b32", W[12], W[9], "3")
+
+    # ---- 共享内存地址 ----
+    emit("mov.u64", D[0], SHARED_VAR)
+    emit("mul.wide.u32", D[1], W[10], str(SHARED_BYTES_PER_WARP))
+    emit("add.s64", D[0], D[0], D[1])
+    emit("mul.wide.u32", D[2], W[9], "24")
+    emit("add.s64", D[3], D[0], D[2])
+
+    # ---- 存 fragment:A 4 字 + B(2 或 1)字 ----
+    for i, r in enumerate(a):
+        emit("st.shared.b32", f"[{D[3]}+{4 * i}]", r)
+    for i, r in enumerate(b):
+        emit("st.shared.b32", f"[{D[3]}+{16 + 4 * i}]", r)
+    emit("bar.sync", "0")
+
+    # ---- 读基址(同 float 系)----
+    emit("mul.wide.u32", D[4], W[11], "96")
+    emit("add.s64", D[5], D[0], D[4])             # A 行组基址
+    emit("mul.wide.u32", D[6], W[12], "192")
+    emit("add.s64", D[7], D[0], D[6])             # B 列 2t 基址
+    emit("add.s64", D[8], D[7], "96")             # B 列 2t+1 基址
+
+    # ---- 累加器 = C(s32)----
+    emit("mov.b32", W[24], c[0])
+    emit("mov.b32", W[25], c[1])
+    emit("mov.b32", W[26], c[2])
+    emit("mov.b32", W[27], c[3])
+
+    # ---- dp4a 展开 ----
+    # dp4a 的 c 操作数是输入:累加器 %dgmi 池必须先清零
+    # (PTX 寄存器初值未定义,否则第一条 dp4a 会累加垃圾 —— 1070 实测)
+    emit("mov.b32", "%dgmi0", "0")
+    emit("mov.b32", "%dgmi1", "0")
+    emit("mov.b32", "%dgmi2", "0")
+    emit("mov.b32", "%dgmi3", "0")
+    # 配对(模拟器验证):每 j ∈ 0..3,
+    #   a0 = lane 4g+j 的 w0(行 g,k=4j..4j+3)   [@D5 + 24j + 0]
+    #   a2 = lane 4g+j 的 w2(行 g+8,同列)       [@D5 + 24j + 8]
+    #   b0 = lane 8t+j 的 b0(列 2t,同 k)        [@D7 + 24j + 16]
+    #   b0c= lane 8t+4+j 的 b0(列 2t+1)          [@D8 + 24j + 16]
+    #   k32 半段:a1 = w1(行 g,k=16+4j..+3)[@D5+24j+4]
+    #            a3 = 行 g+8 同列 [@D5+24j+12]
+    #            b1 = lane 8t+j 的 b1 [@D7+24j+20],b1c = [@D8+24j+20]
+    #   k16:无半段,A 只 w0/w2,B 只 b0;
+    #   m8n8k16:行 0..7(k16 的 A 前半布局),d 只有 2 个 s32。
+    half = (k_len == 32)
+    jmax = 4 if k_len in (32, 16) else 2
+    for j in range(jmax):
+        o = 24 * j
+        emit("ld.shared.b32", W[16], f"[{D[5]}+{o}+0]")       # w0 行 g
+        emit("ld.shared.b32", W[17], f"[{D[5]}+{o}+8]")       # w2 行 g+8
+        emit("ld.shared.b32", W[20], f"[{D[7]}+{o}+16]")      # b0 列 2t
+        emit("ld.shared.b32", W[21], f"[{D[8]}+{o}+16]")      # b0 列 2t+1
+        if half:
+            emit("ld.shared.b32", W[18], f"[{D[5]}+{o}+4]")   # w1 行 g
+            emit("ld.shared.b32", W[19], f"[{D[5]}+{o}+12]")  # w3 行 g+8
+            emit("ld.shared.b32", W[22], f"[{D[7]}+{o}+20]")  # b1 列 2t
+            emit("ld.shared.b32", W[23], f"[{D[8]}+{o}+20]")  # b1 列 2t+1
+        # d0 = 行 g · 列 2t;d1 = 行 g · 列 2t+1
+        emit("dp4a.s32.s32", "%dgmi0", W[16], W[20], "%dgmi0")
+        emit("dp4a.s32.s32", "%dgmi1", W[16], W[21], "%dgmi1")
+        # d2/d3 = 行 g+8
+        emit("dp4a.s32.s32", "%dgmi2", W[17], W[20], "%dgmi2")
+        emit("dp4a.s32.s32", "%dgmi3", W[17], W[21], "%dgmi3")
+        if half:
+            emit("dp4a.s32.s32", "%dgmi0", W[18], W[22], "%dgmi0")
+            emit("dp4a.s32.s32", "%dgmi1", W[18], W[23], "%dgmi1")
+            emit("dp4a.s32.s32", "%dgmi2", W[19], W[22], "%dgmi2")
+            emit("dp4a.s32.s32", "%dgmi3", W[19], W[23], "%dgmi3")
+    # D 写回:C 值加到累加器
+    emit("add.u32", "%dgmi0", "%dgmi0", W[24])
+    emit("add.u32", "%dgmi1", "%dgmi1", W[25])
+    emit("add.u32", "%dgmi2", "%dgmi2", W[26])
+    emit("add.u32", "%dgmi3", "%dgmi3", W[27])
+    emit("mov.b32", d[0], "%dgmi0")
+    emit("mov.b32", d[1], "%dgmi1")
+    emit("mov.b32", d[2], "%dgmi2")
+    emit("mov.b32", d[3], "%dgmi3")
+    return L
+
+
 def pass_mma(entry, shared_used):
     """替换 entry 里的 mma 指令。shared_used: [bool] 透传是否注入了共享缓冲。"""
     body = []
@@ -221,7 +371,10 @@ def pass_mma(entry, shared_used):
                 f"{entry.name} 行{x.line_no}: 谓词化 mma 会导致 bar.sync "
                 f"部分线程死锁,不支持")
         k_len, itype, atype = SHAPES[x.opcode]
-        body.extend(_gen(x, k_len, itype, atype))
+        if itype == "s8":
+            body.extend(_gen_int8(x, k_len))
+        else:
+            body.extend(_gen(x, k_len, itype, atype))
         expanded = True
     if expanded:
         head = list(DECLS)
