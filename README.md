@@ -69,7 +69,9 @@ python setup_tools.py        # downloads cuobjdump + ptxas (~30 MB) from NVIDIA'
 # or: python -m downgrader --gui      (running with no input also opens the GUI)
 ```
 
-Pick a file containing an embedded CUDA fatbin (`.dll` / `.so` / `.cubin` / `.fatbin`) or a single `.ptx`, choose the target architecture, and hit **开始降级 (Downgrade)**. The GUI extracts every kernel's PTX, downgrades it, validates with ptxas, and writes `downgraded_<arch>_<kernel>.ptx` next to the input — with a per-kernel pass/reject log and progress bar. Standard-library tkinter only; no extra dependencies.
+- **Auto-detects your GPU** (via the CUDA driver API, zero dependencies) and pre-selects the matching target architecture — GTX 1070 opens with sm_61 already chosen.
+- Pick a file containing an embedded CUDA fatbin (`.dll` / `.so` / `.cubin` / `.fatbin`) or a single `.ptx`, hit **Downgrade**, and it extracts every kernel's PTX, downgrades, validates with ptxas, and writes `downgraded_<arch>_<kernel>.ptx` next to the input — with a per-kernel pass/reject log and progress bar. An **Open output folder** button appears when done.
+- Remembers your last file/target/language between runs; UI is switchable 中文 / English. Standard-library tkinter only.
 
 ### CLI: downgrade a PTX file
 

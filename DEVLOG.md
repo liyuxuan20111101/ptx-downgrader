@@ -215,3 +215,21 @@ CUDA 13 删除了 sm_61 编译目标,但:
 - 回归:三 mma 模拟器 VERIFIED、test_e2e 全过、int8 k32 GPU 128/128、
   fatbin→提取→降级→校验全链路(fatbinary 11.4 自造 sm_86 fatbin 实测)、
   tkinter 真窗口冒烟通过。
+
+## v0.3.2 开发记录(2026-10-24)—— GUI 使用体验优化
+
+- **显卡自动检测**:ctypes 直调 CUDA driver API(cuInit/cuDeviceGet/
+  cuDeviceGetName/cuDeviceGetAttribute CC 75/76)拿设备名与计算能力,
+  首次启动自动选中匹配的目标架构(如 GTX 1070 → sm_61);检测不到驱动
+  则提示手动选择。零依赖。踩坑:cuDeviceGetName 返回 char*,误用
+  create_unicode_buffer 按 UTF-16 读会得到乱码,必须 create_string_buffer。
+- **中英双语界面**:全部 UI 文案与日志消息 key 化(T 表),右上角 中文/EN
+  一键切换;架构下拉描述随语言重建并保持当前选择。
+- 交互补全:完成后出现"打开产物目录"按钮(os.startfile/xdg-open);
+  运行中按钮变"降级中…";完成行附耗时;输入文件不存在先给提示。
+- **设置持久化**(~/.ptx_downgrader_gui.json):记住上次输入文件/目标/校验
+  开关/语言;二次启动尊重保存的目标,不被自动检测覆盖。踩坑:保存时
+  var_target 是下拉框显示文案,必须经 cb_target.current() 映射回原始
+  架构号再存,否则下次启动识别不出。
+- 回归:GPU 检测实测(GTX 1070 → sm_61)、双语切换、首次自动选、二次
+  启动尊重保存值、真实线程路径跑通;模拟器 3/3、e2e 全过、int8 128/128。
